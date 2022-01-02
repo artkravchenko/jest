@@ -266,18 +266,48 @@ export const getStackTraceLines = (
 
 export const getTopFrame = (lines: Array<string>): Frame | null => {
   for (const line of lines) {
-    if (line.includes(PATH_NODE_MODULES) || line.includes(PATH_JEST_PACKAGES)) {
-      continue;
-    }
+    const frame = getLineFrame(line);
 
-    const parsedFrame = stackUtils.parseLine(line.trim());
-
-    if (parsedFrame && parsedFrame.file) {
-      return parsedFrame as Frame;
+    if (frame) {
+      return frame;
     }
   }
 
   return null;
+};
+
+const getLineFrame = (line: string): Frame | null => {
+  if (line.includes(PATH_NODE_MODULES) || line.includes(PATH_JEST_PACKAGES)) {
+    return null;
+  }
+
+  const parsedFrame = stackUtils.parseLine(line.trim());
+
+  if (parsedFrame && parsedFrame.file) {
+    return parsedFrame;
+  }
+   
+  return null;
+};
+
+const renderCallsite = (frame: Frame) => {
+  let renderedCallsite = '';
+  const {column, file: filename, line} = frame;
+
+  if (line && filename && path.isAbsolute(filename)) {
+    let fileContent;
+
+    try {
+      // TODO: check & read HasteFS instead of reading the filesystem:
+      // see: https://github.com/facebook/jest/pull/5405#discussion_r164281696
+      fileContent = fs.readFileSync(filename, 'utf8');
+      renderedCallsite = getRenderedCallsite(fileContent, line, column);
+    } catch {
+      // the file does not exist or is inaccessible, we ignore
+    }
+  }
+
+  return renderedCallsite;
 };
 
 export const formatStackTrace = (
@@ -287,41 +317,37 @@ export const formatStackTrace = (
   testPath?: Path,
 ): string => {
   const lines = getStackTraceLines(stack, options);
-  let renderedCallsite = '';
   const relativeTestPath = testPath
     ? slash(path.relative(config.rootDir, testPath))
     : null;
 
-  if (!options.noStackTrace && !options.noCodeFrame) {
-    const topFrame = getTopFrame(lines);
-    if (topFrame) {
-      const {column, file: filename, line} = topFrame;
+  const formatLine = (line: string) => {
+    return STACK_INDENT + formatPaths(config, relativeTestPath, trimPaths(line));
+  };
 
-      if (line && filename && path.isAbsolute(filename)) {
-        let fileContent;
-        try {
-          // TODO: check & read HasteFS instead of reading the filesystem:
-          // see: https://github.com/facebook/jest/pull/5405#discussion_r164281696
-          fileContent = fs.readFileSync(filename, 'utf8');
-          renderedCallsite = getRenderedCallsite(fileContent, line, column);
-        } catch {
-          // the file does not exist or is inaccessible, we ignore
-        }
-      }
-    }
+  if (options.noStackTrace || options.noCodeFrame) {
+    const stacktrace = lines
+      .filter(Boolean)
+      .map(formatLine)
+      .join('\n');
+  
+    const summary = `\n${stacktrace}`;
+
+    return summary;
   }
 
-  const stacktrace = lines
+  const detailedTrace = lines
     .filter(Boolean)
-    .map(
-      line =>
-        STACK_INDENT + formatPaths(config, relativeTestPath, trimPaths(line)),
-    )
+    .map((line: string) => {
+      const frame = getLineFrame(line);
+      const callsite = frame && renderCallsite(frame);
+      const formattedLine = formatLine(line);
+
+      return callsite ? `${callsite}\n${formattedLine}` : formattedLine;
+    })
     .join('\n');
 
-  return renderedCallsite
-    ? `${renderedCallsite}\n${stacktrace}`
-    : `\n${stacktrace}`;
+  return detailedTrace;
 };
 
 type FailedResults = Array<{
